@@ -1,0 +1,76 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: EC2 Instance for Jitsi
+
+Parameters:  
+  EC2KeyName:
+    Type: String
+    Default: jitsi-keyname
+  JitsiDomain:
+    Type: String
+
+Resources:
+  JitsiSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:     
+      GroupName: jitsi
+      GroupDescription: shh access for ec2      
+      SecurityGroupIngress:         
+        - FromPort: 22
+          IpProtocol: tcp          
+          CidrIp: 0.0.0.0/0
+          ToPort: 22
+        - FromPort: 80
+          IpProtocol: tcp          
+          CidrIp: 0.0.0.0/0
+          ToPort: 80
+        - FromPort: 443
+          IpProtocol: tcp          
+          CidrIp: 0.0.0.0/0
+          ToPort: 443
+        - FromPort: 10000
+          IpProtocol: udp          
+          CidrIp: 0.0.0.0/0
+          ToPort: 10000
+
+  EC2Worker:
+    Type: AWS::EC2::Instance    
+    Properties: 
+      ImageId: ami-0b418580298265d5c
+      InstanceType: t2.micro
+      KeyName: !Ref EC2KeyName      
+      SecurityGroupIds:
+        - !Ref JitsiSecurityGroup 
+      Tags:
+      - Key: Name
+        Value: Jitsi
+      UserData: 
+        Fn::Base64:
+          !Sub |
+          #!/bin/bash
+
+          ## https://github.com/jitsi/jitsi-meet/blob/master/doc/quick-install.md
+
+          HOSTNAME=$(curl -s http://169.254.169.254/latest/meta-data/public-hostname)
+          sudo hostnamectl set-hostname $HOSTNAME
+          sudo sed -i " 1 s/.*/& $HOSTNAME/" /etc/hosts
+
+          echo 'deb https://download.jitsi.org stable/' | sudo tee /etc/apt/sources.list.d/jitsi-stable.list
+          wget -qO -  https://download.jitsi.org/jitsi-key.gpg.key | sudo apt-key add -
+
+          sudo apt-get update
+          sudo apt-get -y install nginx apt-transport-https debconf-utils 
+
+          ## pre-seed options
+          echo "jitsi-videobridge2 jitsi-videobridge/jvb-hostname string $HOSTNAME" | sudo debconf-set-selections
+          echo "jitsi-meet-web-config jitsi-meet/cert-choice select 'Generate a new self-signed certificate (You will later get a chance to obtain a Let's encrypt certificate)'" | sudo debconf-set-selections
+         
+          sudo apt-get --option=Dpkg::Options::=--force-confold --option=Dpkg::options::=--force-unsafe-io --assume-yes --quiet install jitsi-meet
+          
+          ## patch ngix
+          sudo sed -i " 1 s/server_names_hash_bucket_size 64/server_names_hash_bucket_size 128/" /etc/nginx/sites-enabled/$HOSTNAME.conf
+          while true; do  fail=$(sudo service nginx status  | tail -1 | grep -i fail | wc -l); if [ $fail -ne 0 ]; then sudo service nginx reload; sleep 3; else break; fi; done
+          
+        
+
+# aws --region eu-central-1 cloudformation delete-stack --stack-name ec2-jitsi
+# aws --region eu-central-1 cloudformation deploy --template-file infrastructure.yml --stack-name ec2-jitsi
