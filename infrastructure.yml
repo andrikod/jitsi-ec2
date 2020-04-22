@@ -5,8 +5,20 @@ Parameters:
   EC2KeyName:
     Type: String
     Default: jitsi-keyname
-  JitsiDomain:
+  EC2Instance:
     Type: String
+    Default: t2.micro
+  JitsiDomain:
+    Type: String  
+  Route53HostedZoneID:
+    Type: String
+    Default: Empty
+  # LetsEncryptEmail:
+  #   Type: String
+  #   Default: Empty
+
+Conditions:
+  CreateRecordSet: !Not [!Equals [ !Ref Route53HostedZoneID, 'Empty' ]]
 
 Resources:
   JitsiSecurityGroup:
@@ -33,10 +45,10 @@ Resources:
           ToPort: 10000
 
   EC2Worker:
-    Type: AWS::EC2::Instance    
+    Type: AWS::EC2::Instance
     Properties: 
-      ImageId: ami-0b418580298265d5c
-      InstanceType: t2.micro
+      ImageId: ami-0b418580298265d5c  #ubuntu 18.04 LTS
+      InstanceType: !Ref EC2Instance
       KeyName: !Ref EC2KeyName      
       SecurityGroupIds:
         - !Ref JitsiSecurityGroup 
@@ -44,13 +56,14 @@ Resources:
       - Key: Name
         Value: Jitsi
       UserData: 
-        Fn::Base64:
-          !Sub |
-          #!/bin/bash
+        Fn::Base64: !Sub |          
+          #!/bin/bash          
 
           ## https://github.com/jitsi/jitsi-meet/blob/master/doc/quick-install.md
-
-          HOSTNAME=$(curl -s http://169.254.169.254/latest/meta-data/public-hostname)
+          
+          HOSTNAME=${JitsiDomain}
+          if [ -z $HOSTNAME ]; then HOSTNAME=$(curl -s http://169.254.169.254/latest/meta-data/public-hostname); fi
+                    
           sudo hostnamectl set-hostname $HOSTNAME
           sudo sed -i " 1 s/.*/& $HOSTNAME/" /etc/hosts
 
@@ -58,19 +71,30 @@ Resources:
           wget -qO -  https://download.jitsi.org/jitsi-key.gpg.key | sudo apt-key add -
 
           sudo apt-get update
-          sudo apt-get -y install nginx apt-transport-https debconf-utils 
+          sudo apt-get -y install nginx apt-transport-https debconf-utils
 
-          ## pre-seed options
+          ## pre-seed options & install jitsi-meet
           echo "jitsi-videobridge2 jitsi-videobridge/jvb-hostname string $HOSTNAME" | sudo debconf-set-selections
-          echo "jitsi-meet-web-config jitsi-meet/cert-choice select 'Generate a new self-signed certificate (You will later get a chance to obtain a Let's encrypt certificate)'" | sudo debconf-set-selections
-         
+          echo "jitsi-meet-web-config jitsi-meet/cert-choice select 'Generate a new self-signed certificate (You will later get a chance to obtain a Let's encrypt certificate)'" | sudo debconf-set-selections         
           sudo apt-get --option=Dpkg::Options::=--force-confold --option=Dpkg::options::=--force-unsafe-io --assume-yes --quiet install jitsi-meet
           
-          ## patch ngix
-          sudo sed -i " 1 s/server_names_hash_bucket_size 64/server_names_hash_bucket_size 128/" /etc/nginx/sites-enabled/$HOSTNAME.conf
+          ## patch nginx
+          sudo sed -i " 1 s/server_names_hash_bucket_size 64/server_names_hash_bucket_size 128/" /etc/nginx/sites-available/$HOSTNAME.conf
           while true; do  fail=$(sudo service nginx status  | tail -1 | grep -i fail | wc -l); if [ $fail -ne 0 ]; then sudo service nginx reload; sleep 3; else break; fi; done
           
-        
+          ## TODO
+          ## create letsencrypt certificate
+          ## if [! -z $LetsEncryptEmail ]; then  printf '$LetsEncryptEmail\n' | sudo /usr/share/jitsi-meet/scripts/install-letsencrypt-cert.sh; fi
 
-# aws --region eu-central-1 cloudformation delete-stack --stack-name ec2-jitsi
-# aws --region eu-central-1 cloudformation deploy --template-file infrastructure.yml --stack-name ec2-jitsi
+
+  JitsiRecordSet:    
+    Type: AWS::Route53::RecordSet
+    DependsOn: EC2Worker
+    Condition: CreateRecordSet
+    Properties:
+      HostedZoneId: !Ref Route53HostedZoneID
+      Name: !Ref JitsiDomain
+      Type: A
+      TTL: 60
+      ResourceRecords:
+      - !GetAtt EC2Worker.PublicIp
