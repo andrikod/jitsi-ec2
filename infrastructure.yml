@@ -5,20 +5,26 @@ Parameters:
   EC2KeyName:
     Type: String
     Default: jitsi-keyname
+    Description: The SSH key for accessing the instance
   EC2Instance:
     Type: String
     Default: t2.micro
+    Description: The type of EC2 instance
   JitsiDomain:
-    Type: String  
+    Type: String
+    Description: (Optional) Domain name for the EC2 instance
+    Default: AWS::NoValue
   Route53HostedZoneID:
     Type: String
-    Default: Empty
-  # LetsEncryptEmail:
-  #   Type: String
-  #   Default: Empty
+    Default: AWS::NoValue
+    Description: (Optional) If above domain is managed by AWS Route53, a Route53 record set will be created for the EC2's Public IP
+  LetsEncryptEmail:
+    Type: String
+    Default: AWS::NoValue
+    Description: (Optional) If Domain is given, a let's encrypt certificate will be generated with this email as owner
 
 Conditions:
-  CreateRecordSet: !Not [!Equals [ !Ref Route53HostedZoneID, 'Empty' ]]
+  CreateRecordSet: !Not [!Equals [ !Ref Route53HostedZoneID, "" ]]
 
 Resources:
   JitsiSecurityGroup:
@@ -62,8 +68,9 @@ Resources:
           ## https://github.com/jitsi/jitsi-meet/blob/master/doc/quick-install.md
           
           HOSTNAME=${JitsiDomain}
-          if [ -z $HOSTNAME ]; then HOSTNAME=$(curl -s http://169.254.169.254/latest/meta-data/public-hostname); fi
-                    
+          if [ -z $HOSTNAME ]; then HOSTNAME=$(curl -s http://169.254.169.254/latest/meta-data/public-hostname); fi                    
+          
+          echo "Setting hostame $HOSTNAME" >> /home/ubuntu/progress.log
           sudo hostnamectl set-hostname $HOSTNAME
           sudo sed -i " 1 s/.*/& $HOSTNAME/" /etc/hosts
 
@@ -73,18 +80,28 @@ Resources:
           sudo apt-get update
           sudo apt-get -y install nginx apt-transport-https debconf-utils
 
+          echo "Installing jitsi-meet" >> /home/ubuntu/progress.log
           ## pre-seed options & install jitsi-meet
           echo "jitsi-videobridge2 jitsi-videobridge/jvb-hostname string $HOSTNAME" | sudo debconf-set-selections
           echo "jitsi-meet-web-config jitsi-meet/cert-choice select 'Generate a new self-signed certificate (You will later get a chance to obtain a Let's encrypt certificate)'" | sudo debconf-set-selections         
           sudo apt-get --option=Dpkg::Options::=--force-confold --option=Dpkg::options::=--force-unsafe-io --assume-yes --quiet install jitsi-meet
           
+          echo "Patching /etc/nginx/sites-available/$HOSTNAME.conf" >> /home/ubuntu/progress.log
           ## patch nginx
           sudo sed -i " 1 s/server_names_hash_bucket_size 64/server_names_hash_bucket_size 128/" /etc/nginx/sites-available/$HOSTNAME.conf
-          while true; do  fail=$(sudo service nginx status  | tail -1 | grep -i fail | wc -l); if [ $fail -ne 0 ]; then sudo service nginx reload; sleep 3; else break; fi; done
-          
-          ## TODO
+          while true; do fail=$(sudo service nginx status  | tail -1 | grep -i fail | wc -l); if [ $fail -ne 0 ]; then  sudo service nginx reload; sleep 3; else break; fi; done
+
+          ## FIXME: very, very ugly: find a better way..
           ## create letsencrypt certificate
-          ## if [! -z $LetsEncryptEmail ]; then  printf '$LetsEncryptEmail\n' | sudo /usr/share/jitsi-meet/scripts/install-letsencrypt-cert.sh; fi
+          OWNER_EMAIL=${LetsEncryptEmail}                    
+          if [ -n $JitsiDomain ] && [ -n $OWNER_EMAIL ]
+            then
+              echo "Creating certificate for $OWNER_EMAIL" >> /home/ubuntu/progress.log
+              while true; do success=$(printf "$OWNER_EMAIL\n" | sudo /usr/share/jitsi-meet/scripts/install-letsencrypt-cert.sh | grep -i "Congratulations! Your certificate and chain have been saved at" | wc -l); if [ $success -eq 1 ]; then  break;  else  sleep 5; fi; done
+          fi
+
+          echo "Install completed" >> /home/ubuntu/progress.log
+          
 
 
   JitsiRecordSet:    
